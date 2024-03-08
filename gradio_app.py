@@ -13,6 +13,9 @@ from functools import partial
 from tsr.system import TSR
 from tsr.utils import remove_background, resize_foreground, to_gradio_3d_orientation
 
+import argparse
+
+
 if torch.cuda.is_available():
     device = "cuda:0"
 else:
@@ -55,22 +58,25 @@ def preprocess(input_image, do_remove_background, foreground_ratio):
     return image
 
 
-def generate(image):
+def generate(image, mc_resolution, formats=["obj", "glb"]):
     scene_codes = model(image, device=device)
-    mesh = model.extract_mesh(scene_codes)[0]
+    mesh = model.extract_mesh(scene_codes, resolution=mc_resolution)[0]
     mesh = to_gradio_3d_orientation(mesh)
-    mesh_path = tempfile.NamedTemporaryFile(suffix=".obj", delete=False)
-    mesh.export(mesh_path.name)
-    return mesh_path.name
+    rv = []
+    for format in formats:
+        mesh_path = tempfile.NamedTemporaryFile(suffix=f".{format}", delete=False)
+        mesh.export(mesh_path.name)
+        rv.append(mesh_path.name)
+    return rv
 
 
 def run_example(image_pil):
     preprocessed = preprocess(image_pil, False, 0.9)
-    mesh_name = generate(preprocessed)
-    return preprocessed, mesh_name
+    mesh_name_obj, mesh_name_glb = generate(preprocessed, 256, ["obj", "glb"])
+    return preprocessed, mesh_name_obj, mesh_name_glb
 
 
-with gr.Blocks() as demo:
+with gr.Blocks(title="TripoSR") as interface:
     gr.Markdown(
         """
     # TripoSR Demo
@@ -105,14 +111,28 @@ with gr.Blocks() as demo:
                         value=0.85,
                         step=0.05,
                     )
+                    mc_resolution = gr.Slider(
+                        label="Marching Cubes Resolution",
+                        minimum=32,
+                        maximum=320,
+                        value=256,
+                        step=32
+                    )
             with gr.Row():
                 submit = gr.Button("Generate", elem_id="generate", variant="primary")
         with gr.Column():
-            with gr.Tab("Model"):
-                output_model = gr.Model3D(
-                    label="Output Model",
+            with gr.Tab("OBJ"):
+                output_model_obj = gr.Model3D(
+                    label="Output Model (OBJ Format)",
                     interactive=False,
                 )
+                gr.Markdown("Note: The model shown here is flipped. Download to get correct results.")
+            with gr.Tab("GLB"):
+                output_model_glb = gr.Model3D(
+                    label="Output Model (GLB Format)",
+                    interactive=False,
+                )
+                gr.Markdown("Note: The model shown here has a darker appearance. Download to get correct results.")
     with gr.Row(variant="panel"):
         gr.Examples(
             examples=[
@@ -131,7 +151,7 @@ with gr.Blocks() as demo:
                 "examples/captured_p.png",
             ],
             inputs=[input_image],
-            outputs=[processed_image, output_model],
+            outputs=[processed_image, output_model_obj, output_model_glb],
             cache_examples=False,
             fn=partial(run_example),
             label="Examples",
@@ -143,9 +163,25 @@ with gr.Blocks() as demo:
         outputs=[processed_image],
     ).success(
         fn=generate,
-        inputs=[processed_image],
-        outputs=[output_model],
+        inputs=[processed_image, mc_resolution],
+        outputs=[output_model_obj, output_model_glb],
     )
 
-demo.queue(max_size=1)
-demo.launch()
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--username', type=str, default=None, help='Username for authentication')
+    parser.add_argument('--password', type=str, default=None, help='Password for authentication')
+    parser.add_argument('--port', type=int, default=7860, help='Port to run the server listener on')
+    parser.add_argument("--listen", action='store_true', help="launch gradio with 0.0.0.0 as server name, allowing to respond to network requests")
+    parser.add_argument("--share", action='store_true', help="use share=True for gradio and make the UI accessible through their site")
+    parser.add_argument("--queuesize", type=int, default=1, help="launch gradio queue max_size")
+    args = parser.parse_args()
+    interface.queue(max_size=args.queuesize)
+    interface.launch(
+        auth=(args.username, args.password) if (args.username and args.password) else None,
+        share=args.share,
+        server_name="0.0.0.0" if args.listen else None, 
+        server_port=args.port
+    )
